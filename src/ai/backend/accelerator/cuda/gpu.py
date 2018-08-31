@@ -18,22 +18,35 @@ log = logging.getLogger('ai.backend.accelerator.cuda')
 @attr.s(auto_attribs=True)
 class CUDAAcceleratorInfo(AbstractAcceleratorInfo):
 
+    # TODO: make this configurable
     unit_memory = (2 * (2 ** 30))  # 1 unit = 2 GiB
     unit_proc = 8                  # 1 unit = 8 SMPs
 
     def max_share(self) -> decimal.Decimal:
         mem_shares = self.memory_size / self.unit_memory
         proc_shares = self.processing_units / self.unit_proc
+        common_shares = min(mem_shares, proc_shares)
         with decimal.localcontext() as ctx:
             ctx.rounding = decimal.ROUND_DOWN
             quantum = decimal.Decimal('1.00')
-            return decimal.Decimal(min(mem_shares, proc_shares)).quantize(quantum)
+            return decimal.Decimal(common_shares).quantize(quantum)
 
-    def share_to_memory(self, share: decimal.Decimal) -> int:
-        return int(self.unit_memory * share)
+    def share_to_spec(self, share: decimal.Decimal) -> (int, int):
+        # TODO: consider the memory margin for heap size?
+        return (
+            int(self.unit_memory * share),
+            int(self.unit_proc * share),
+        )
 
-    def share_to_processing_units(self, share: decimal.Decimal) -> int:
-        return int(self.unit_proc * share)
+    def spec_to_share(self, requested_memory: int,
+                      requested_proc_units: int) -> decimal.Decimal:
+        mem_share = requested_memory / self.unit_memory
+        proc_share = requested_proc_units / self.unit_proc
+        required_share = max(mem_share, proc_share)
+        with decimal.localcontext() as ctx:
+            ctx.rounding = decimal.ROUND_UP
+            quantum = decimal.Decimal('1.00')
+            return decimal.Decimal(required_share).quantize(quantum)
 
 
 class CUDAAccelerator(AbstractAccelerator):
