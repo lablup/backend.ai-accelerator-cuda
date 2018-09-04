@@ -59,11 +59,11 @@ class CUDAAccelerator(AbstractAccelerator):
         for dev_idx in range(num_devices):
             raw_info = libcudart.get_device_props(dev_idx)
             sysfs_node_path = "/sys/bus/pci/devices/" \
-                              f"{raw_info['pciBusID_str']}/numa_node"
+                              f"{raw_info['pciBusID_str'].lower()}/numa_node"
             try:
                 node = int(Path(sysfs_node_path).read_text().strip())
             except OSError:
-                node = -1
+                node = None
             dev_info = CUDAAcceleratorInfo(
                 device_id=dev_idx,
                 hw_location=raw_info['pciBusID_str'],
@@ -109,13 +109,14 @@ class CUDAAccelerator(AbstractAccelerator):
             devices = []
             for dev in nvidia_params['Devices']:
                 m = re.search(r'^/dev/nvidia(\d+)$', dev)
+                # Add nvidiactl, nvidia-uvm, ... etc.
                 if m is None:
                     devices.append(dev)
                     continue
                 dev_idx = int(m.group(1))
+                # Only expose GPUs in the same NUMA node.
                 if dev_idx not in proc_shares:
                     continue
-                # Only expose GPUs in the same NUMA node.
                 for gpu in gpu_info['Devices']:
                     if gpu['Path'] == dev:
                         try:
@@ -123,10 +124,12 @@ class CUDAAccelerator(AbstractAccelerator):
                             pci_path = f"/sys/bus/pci/devices/{pci_id}/numa_node"
                             gpu_node = int(Path(pci_path).read_text().strip())
                         except FileNotFoundError:
-                            gpu_node = -1
+                            gpu_node = None
                         # Even when numa_node file exists, gpu_node may become -1
                         # (e.g., Amazon p2 instances)
-                        if gpu_node == numa_node or gpu_node == -1:
+                        if gpu_node == -1:
+                            gpu_node = None
+                        if gpu_node is None or gpu_node == numa_node:
                             devices.append(dev)
             devices = [{
                 'PathOnHost': dev,
