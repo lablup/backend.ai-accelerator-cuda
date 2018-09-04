@@ -1,5 +1,6 @@
 import subprocess
 import logging
+from pprint import pformat
 
 from ai.backend.agent.accelerator import accelerator_types
 from .gpu import CUDAAccelerator
@@ -20,3 +21,6 @@ async def init(etcd):
         if m is not None:
             CUDAAccelerator.nvdocker_version = tuple(map(int, m.group(1).split('.')))
     accelerator_types['cuda'] = CUDAAccelerator
+    detected_devices = CUDAAccelerator.list_devices()
+    log.info('detected devices:\n' +
+             pformat(detected_devices))
