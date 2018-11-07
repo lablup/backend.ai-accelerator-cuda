@@ -146,7 +146,7 @@ class CUDAAccelerator(AbstractAccelerator):
             gpus = []
             num_devices = libcudart.get_device_count()
             for dev_idx in range(num_devices):
-                if dev_idx not in proc_shares:
+                if dev_idx in proc_shares:
                     # TODO: check numa node
                     gpus.append(dev_idx)
             return {
