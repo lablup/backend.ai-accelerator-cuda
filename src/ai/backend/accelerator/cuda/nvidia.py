@@ -15,7 +15,7 @@ TARGET_CUDA_VERSIONS = (
 
 
 class cudaDeviceProp_v10(ctypes.Structure):
-    _fields = [
+    _fields_ = [
         ('name', ctypes.c_char * 256),
         ('uuid', ctypes.c_char * 16),  # cudaUUID_t
         ('totalGlobalMem', ctypes.c_size_t),
