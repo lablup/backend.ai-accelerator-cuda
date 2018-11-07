@@ -18,6 +18,8 @@ class cudaDeviceProp_v10(ctypes.Structure):
     _fields_ = [
         ('name', ctypes.c_char * 256),
         ('uuid', ctypes.c_char * 16),  # cudaUUID_t
+        ('luid', ctypes.c_char * 8),
+        ('luidDeviceNodeMask', ctypes.c_uint),
         ('totalGlobalMem', ctypes.c_size_t),
         ('sharedMemPerBlock', ctypes.c_size_t),
         ('regsPerBlock', ctypes.c_int),
