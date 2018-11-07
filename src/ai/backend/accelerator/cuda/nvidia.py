@@ -218,7 +218,7 @@ class libcudart:
             cls._lib = _load_libcudart()
             raw_ver = ctypes.c_int()
             cls.invoke_lib('cudaRuntimeGetVersion', ctypes.byref(raw_ver))
-            cls._version = (raw_ver // 1000, (raw_ver % 100) // 10)
+            cls._version = (raw_ver.value // 1000, (raw_ver.value % 100) // 10)
         if cls._lib is None:
             raise ImportError('CUDA runtime is not available!')
 
