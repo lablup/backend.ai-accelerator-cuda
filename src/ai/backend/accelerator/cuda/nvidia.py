@@ -252,12 +252,14 @@ class libcudart:
     @classmethod
     def get_device_props(cls, dev_idx: int):
         if cls._version >= (10, 0):
+            prop_type = cudaDeviceProp_v10
             props = cudaDeviceProp_v10()
         else:
+            prop_type = cudaDeviceProp
             props = cudaDeviceProp()
         cls.invoke_lib('cudaGetDeviceProperties', ctypes.byref(props), dev_idx)
         props = {
-            k: getattr(props, k) for k, _ in cudaDeviceProp._fields_
+            k: getattr(props, k) for k, _ in prop_type._fields_
         }
         pci_bus_id = b' ' * 16
         cls.invoke_lib('cudaDeviceGetPCIBusId',
