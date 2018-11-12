@@ -73,9 +73,8 @@ class TPUAccelerator(AbstractAccelerator):
                 hw_location = m.group(1).strip()
             else:
                 hw_location = 'unknown'
-            # Memory size for TPU? For now, just set fixed value (compute engine's
-            # memory).
-            memory_size = 7.5 * 1000 ** 3
+            # TPU seems to use the memory of host compute instance.
+            memory_size = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
             dev_info = TPUAcceleratorInfo(
                 device_id=dev_idx,
                 hw_location=f'{hw_location}@{dev_name}',
