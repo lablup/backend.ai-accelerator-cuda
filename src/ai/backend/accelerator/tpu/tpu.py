@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Collection
 
@@ -22,7 +23,7 @@ class TPUAcceleratorInfo(AbstractAcceleratorInfo):
 
     # TODO: make this configurable
     unit_memory = (2 * (2 ** 30))  # 1 unit = 2 GiB
-    unit_proc = 8                  # 1 unit = 8 SMPs
+    unit_proc = 1                  # 1 unit = 1 TPU
 
     def max_share(self) -> Decimal:
         mem_shares = self.memory_size / self.unit_memory
@@ -58,26 +59,29 @@ class TPUAccelerator(AbstractAccelerator):
 
     @classmethod
     def list_devices(cls) -> Collection[TPUAcceleratorInfo]:
-        ret = subprocess.run(['ctpu', 'ls', '-no-header', '|', 'awk',
-                              '"{ print $2 }"'], stdout=subprocess.PIPE)
-        device_names = ret.stdout.decode().strip().splitlines()
-        cls.num_devices = len(device_names)
+        # cmd = shlex.split("ctpu ls -no-header | awk '{print $2}'")
+        cmd = shlex.split('ctpu ls -no-header')
+        ret = subprocess.run(cmd, stdout=subprocess.PIPE)
+        dev_infos = ret.stdout.decode().strip().splitlines()
+        cls.num_devices = len(dev_infos)
         all_devices = []
         for dev_idx in range(cls.num_devices) :
-            details = subprocess.run(['ctpu', 'status', '-details', '-name', name],
+            dev_name = dev_infos[dev_idx].split()[1]
+            details = subprocess.run(['ctpu', 'status', '-details', '-name', dev_name],
                                      stdout=subprocess.PIPE)
-            rx_hw_location = re.compile(r'^Compute Engine Machine Type:(.+)$')
-            m = rx_hw_location.search(details)
+            rx_hw_location = re.compile(r'\nCompute Engine Machine Type:(.+)\n')
+            m = rx_hw_location.search(details.stdout.decode())
             if m is not None:
                 hw_location = m.group(1).strip()
             else:
                 hw_location = 'unknown'
             # Memory size for TPU? For now, just set fixed value (compute engine's
             # memory).
-            memory_size = 7.5 * (2 * 10) * (2 * 10) * (2 * 10)
+            memory_size = 7.5 * 1000 ** 3
             dev_info = TPUAcceleratorInfo(
                 device_id=dev_idx,
-                hw_location=f'{hw_location}@{device_names[dev_idx]}',
+                hw_location=f'{hw_location}@{dev_name}',
+                numa_node=None,
                 memory_size=memory_size,
                 processing_units=1,  # TPU sharing is not possible for now
             )
@@ -85,7 +89,7 @@ class TPUAccelerator(AbstractAccelerator):
         return all_devices
 
     @classmethod
-    async def generate_docker_args(cls, docker, proc_shares):
+    async def generate_docker_args(cls, docker, numa_node, proc_shares):
         tpus = []
         for dev_idx in range(cls.num_devices):
             if dev_idx not in proc_shares:
