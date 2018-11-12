@@ -56,14 +56,17 @@ class TPUAccelerator(AbstractAccelerator):
     num_devices = 0
 
     @classmethod
-    def list_devices(cls) -> Collection[TPUAcceleratorInfo]:
-        # cmd = shlex.split("ctpu ls -no-header | awk '{print $2}'")
+    def get_device_infos(cls):
         cmd = shlex.split('ctpu ls -no-header')
         ret = subprocess.run(cmd, stdout=subprocess.PIPE)
         dev_infos = ret.stdout.decode().strip().splitlines()
-        cls.num_devices = len(dev_infos)
+        return len(dev_infos), dev_infos
+
+    @classmethod
+    def list_devices(cls) -> Collection[TPUAcceleratorInfo]:
         all_devices = []
-        for dev_idx in range(cls.num_devices):
+        num_devices, dev_infos = cls.get_device_infos()
+        for dev_idx in range(num_devices):
             dev_name = dev_infos[dev_idx].split()[1]
             details = subprocess.run(['ctpu', 'status', '-details', '-name',
                                       dev_name], stdout=subprocess.PIPE)
@@ -88,14 +91,18 @@ class TPUAccelerator(AbstractAccelerator):
     @classmethod
     async def generate_docker_args(cls, docker, numa_node, proc_shares):
         tpus = []
-        for dev_idx in range(cls.num_devices):
-            if dev_idx not in proc_shares:
-                tpus.append(dev_idx)
-        return {
-            # TODO: There's no way to use multiple tpus now. Only the first TPU will
-            # be used.
-            'Env': [
-                f"TPU_VISIBLE_DEVICES={','.join(map(str, tpus))}",
-                f"TPU_NAME={os.environ.get('TPU_NAME', '')}",
-            ],
-        }
+        tpu_names = []
+        num_devices, dev_infos = cls.get_device_infos()
+        for devidx in range(num_devices):
+            if devidx not in proc_shares:
+                tpus.append(devidx)
+                tpu_names.append(f'TPU{dev_idx}_NAME={dev_infos[devidx].split()[1]}')
+        # TODO: User code can access TPU with TPU_NAME environment variable. How to
+        # make this eaiser if there are multiple TPU cores? Currently, we assume
+        # there's only one TPU core.
+        env = [
+            f"TPU_VISIBLE_DEVICES={','.join(map(str, tpus))}",
+            f'TPU_NAME={dev_infos[0].split()[1]}',
+        ]
+        env.extend(tpu_names)
+        return {'Env': env}
