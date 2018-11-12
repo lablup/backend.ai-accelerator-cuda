@@ -1,14 +1,12 @@
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import logging
 import os
-from pathlib import Path
 import re
 import shlex
 import subprocess
 from typing import Collection
 
 import attr
-import requests
 
 from ai.backend.agent.accelerator import (
     AbstractAccelerator, AbstractAcceleratorInfo,
@@ -65,10 +63,10 @@ class TPUAccelerator(AbstractAccelerator):
         dev_infos = ret.stdout.decode().strip().splitlines()
         cls.num_devices = len(dev_infos)
         all_devices = []
-        for dev_idx in range(cls.num_devices) :
+        for dev_idx in range(cls.num_devices):
             dev_name = dev_infos[dev_idx].split()[1]
-            details = subprocess.run(['ctpu', 'status', '-details', '-name', dev_name],
-                                     stdout=subprocess.PIPE)
+            details = subprocess.run(['ctpu', 'status', '-details', '-name',
+                                      dev_name], stdout=subprocess.PIPE)
             rx_hw_location = re.compile(r'\nCompute Engine Machine Type:(.+)\n')
             m = rx_hw_location.search(details.stdout.decode())
             if m is not None:
