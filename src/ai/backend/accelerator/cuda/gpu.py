@@ -2,7 +2,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import logging
 from pathlib import Path
 import re
-from typing import Collection
+from typing import Collection, Sequence
 
 import attr
 import requests
@@ -73,6 +73,11 @@ class CUDAAccelerator(AbstractAccelerator):
             )
             all_devices.append(dev_info)
         return all_devices
+
+    @classmethod
+    def get_hooks(cls, distro: str, arch: str) -> Sequence[Path]:
+        # TODO: implement
+        return []
 
     @classmethod
     async def generate_docker_args(cls, docker, numa_node, proc_shares):
