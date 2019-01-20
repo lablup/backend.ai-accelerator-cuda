@@ -10,9 +10,10 @@ import requests
 from ai.backend.agent.accelerator import (
     AbstractAccelerator, AbstractAcceleratorInfo,
 )
+from ai.backend.common.logging import BraceStyleAdapter
 from .nvidia import libcudart
 
-log = logging.getLogger('ai.backend.accelerator.cuda')
+log = BraceStyleAdapter(logging.getLogger('ai.backend.accelerator.cuda'))
 
 
 @attr.s(auto_attribs=True)
@@ -21,6 +22,9 @@ class CUDAAcceleratorInfo(AbstractAcceleratorInfo):
     # TODO: make this configurable
     unit_memory = (2 * (2 ** 30))  # 1 unit = 2 GiB
     unit_proc = 8                  # 1 unit = 8 SMPs
+
+    def is_fractional(self) -> bool:
+        return False
 
     def max_share(self) -> Decimal:
         mem_shares = self.memory_size / self.unit_memory
@@ -47,10 +51,9 @@ class CUDAAcceleratorInfo(AbstractAcceleratorInfo):
 
 class CUDAAccelerator(AbstractAccelerator):
 
-    slot_key = 'gpu'  # TODO: generalize
+    slot_key = 'cuda'
 
     nvdocker_version = (0, 0, 0)
-    rx_nvdocker_version = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
 
     @classmethod
     def list_devices(cls) -> Collection[CUDAAcceleratorInfo]:
@@ -80,13 +83,11 @@ class CUDAAccelerator(AbstractAccelerator):
         return []
 
     @classmethod
-    async def generate_docker_args(cls, docker, numa_node, proc_shares):
+    async def generate_docker_args(cls, docker, proc_shares):
         if cls.nvdocker_version[0] == 1:
             try:
                 r = requests.get('http://localhost:3476/docker/cli/json')
                 nvidia_params = r.json()
-                r = requests.get('http://localhost:3476/gpu/info/json')
-                gpu_info = r.json()
             except requests.exceptions.ConnectionError:
                 raise RuntimeError('NVIDIA Docker plugin is not available.')
 
@@ -114,28 +115,15 @@ class CUDAAccelerator(AbstractAccelerator):
             devices = []
             for dev in nvidia_params['Devices']:
                 m = re.search(r'^/dev/nvidia(\d+)$', dev)
-                # Add nvidiactl, nvidia-uvm, ... etc.
                 if m is None:
+                    # Always add non-GPU device files required by the driver.
+                    # (e.g., nvidiactl, nvidia-uvm, ... etc.)
                     devices.append(dev)
                     continue
                 dev_idx = int(m.group(1))
-                # Only expose GPUs in the same NUMA node.
                 if dev_idx not in proc_shares:
                     continue
-                for gpu in gpu_info['Devices']:
-                    if gpu['Path'] == dev:
-                        try:
-                            pci_id = gpu['PCI']['BusID'].lower()
-                            pci_path = f"/sys/bus/pci/devices/{pci_id}/numa_node"
-                            gpu_node = int(Path(pci_path).read_text().strip())
-                        except FileNotFoundError:
-                            gpu_node = None
-                        # Even when numa_node file exists, gpu_node may become -1
-                        # (e.g., Amazon p2 instances)
-                        if gpu_node == -1:
-                            gpu_node = None
-                        if gpu_node is None or gpu_node == numa_node:
-                            devices.append(dev)
+                devices.append(dev)
             devices = [{
                 'PathOnHost': dev,
                 'PathInContainer': dev,
@@ -152,7 +140,6 @@ class CUDAAccelerator(AbstractAccelerator):
             num_devices = libcudart.get_device_count()
             for dev_idx in range(num_devices):
                 if dev_idx in proc_shares:
-                    # TODO: check numa node
                     gpus.append(dev_idx)
             return {
                 'HostConfig': {
