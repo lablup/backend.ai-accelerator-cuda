@@ -104,7 +104,12 @@ class CUDAPlugin(AbstractComputePlugin):
         return []
 
     @classmethod
-    async def generate_docker_args(cls, docker, per_device_alloc):
+    async def generate_docker_args(cls, docker, device_alloc):
+        active_device_ids = set()
+        for slot_type, per_device_alloc in device_alloc.items():
+            for dev_id, alloc in per_device_alloc.items():
+                if alloc > 0:
+                    active_device_ids.add(dev_id)
         if cls.nvdocker_version[0] == 1:
             timeout = aiohttp.Timeout(total=3)
             async with aiohttp.ClientSession(raise_for_status=True,
@@ -146,7 +151,7 @@ class CUDAPlugin(AbstractComputePlugin):
                     devices.append(dev)
                     continue
                 dev_idx = int(m.group(1))
-                if dev_idx not in per_device_alloc:
+                if dev_idx not in active_device_ids:
                     continue
                 devices.append(dev)
             devices = [{
@@ -161,17 +166,14 @@ class CUDAPlugin(AbstractComputePlugin):
                 },
             }
         elif cls.nvdocker_version[0] == 2:
-            gpus = []
-            num_devices = libcudart.get_device_count()
-            for dev_idx in range(num_devices):
-                if dev_idx in per_device_alloc:
-                    gpus.append(dev_idx)
+            device_list_str = ','.join(
+                map(str, sorted(active_device_ids)))
             return {
                 'HostConfig': {
                     'Runtime': 'nvidia',
                 },
                 'Env': [
-                    f"NVIDIA_VISIBLE_DEVICES={','.join(map(str, gpus))}",
+                    f"NVIDIA_VISIBLE_DEVICES={device_list_str}",
                 ],
             }
         else:
