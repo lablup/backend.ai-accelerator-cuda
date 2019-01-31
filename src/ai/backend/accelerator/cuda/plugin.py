@@ -111,7 +111,7 @@ class CUDAPlugin(AbstractComputePlugin):
                 if alloc > 0:
                     active_device_ids.add(dev_id)
         if cls.nvdocker_version[0] == 1:
-            timeout = aiohttp.Timeout(total=3)
+            timeout = aiohttp.ClientTimeout(total=3)
             async with aiohttp.ClientSession(raise_for_status=True,
                                              timeout=timeout) as sess:
                 try:
