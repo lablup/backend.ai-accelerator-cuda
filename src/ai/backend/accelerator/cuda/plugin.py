@@ -26,7 +26,7 @@ async def init(etcd):
     except FileNotFoundError:
         log.warning('nvidia-docker is not installed.')
         log.info('CUDA acceleration is disabled.')
-        return 0
+        return
     rx = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
     for line in ret.stdout.decode().strip().splitlines():
         m = rx.search(line)
@@ -37,6 +37,9 @@ async def init(etcd):
         log.error('could not detect nvidia-docker version!')
         log.info('CUDA acceleration is disabled.')
         return
+    device_mask = await etcd.get('config/plugins/cuda/device_mask')
+    if device_mask is not None:
+        CUDAPlugin.device_mask = [*map(int, device_mask.split(','))]
     detected_devices = await CUDAPlugin.list_devices()
     log.info('detected devices:\n' + pformat(detected_devices))
     log.info('nvidia-docker version: {}', CUDAPlugin.nvdocker_version)
@@ -56,6 +59,8 @@ class CUDAPlugin(AbstractComputePlugin):
         ('cuda.device', 'count'),  # provided for legacy (not allocatable!)
     )
 
+    device_mask = []
+
     nvdocker_version = (0, 0, 0)
 
     @classmethod
@@ -63,6 +68,8 @@ class CUDAPlugin(AbstractComputePlugin):
         all_devices = []
         num_devices = libcudart.get_device_count()
         for dev_idx in range(num_devices):
+            if dev_idx in cls.device_mask:
+                continue
             raw_info = libcudart.get_device_props(dev_idx)
             sysfs_node_path = "/sys/bus/pci/devices/" \
                               f"{raw_info['pciBusID_str'].lower()}/numa_node"
@@ -86,7 +93,6 @@ class CUDAPlugin(AbstractComputePlugin):
         slots = {
             'cuda.smp': sum(dev.processing_units for dev in devices),
             'cuda.mem': f'{BinarySize(sum(dev.memory_size for dev in devices)):g}',
-            # TODO: fractional alloc map
             'cuda.device': len(devices),
         }
         return slots
@@ -94,7 +100,6 @@ class CUDAPlugin(AbstractComputePlugin):
     @classmethod
     async def create_alloc_map(cls) -> AbstractAllocMap:
         devices = await cls.list_devices()
-        # TODO: fractional alloc map
         return DiscretePropertyAllocMap(
             devices=devices,
             prop_func=lambda dev: 1)
