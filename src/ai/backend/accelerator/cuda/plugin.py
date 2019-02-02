@@ -27,7 +27,8 @@ async def init(etcd):
     except FileNotFoundError:
         log.warning('nvidia-docker is not installed.')
         log.info('CUDA acceleration is disabled.')
-        return
+        CUDAPlugin.enabled = False
+        return CUDAPlugin
     rx = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
     for line in ret.stdout.decode().strip().splitlines():
         m = rx.search(line)
@@ -37,7 +38,8 @@ async def init(etcd):
     else:
         log.error('could not detect nvidia-docker version!')
         log.info('CUDA acceleration is disabled.')
-        return
+        CUDAPlugin.enabled = False
+        return CUDAPlugin
     device_mask = await etcd.get('config/plugins/cuda/device_mask')
     if device_mask is not None:
         CUDAPlugin.device_mask = [*device_mask.split(',')]
@@ -61,11 +63,14 @@ class CUDAPlugin(AbstractComputePlugin):
     )
 
     device_mask = []
+    enabled = True
 
     nvdocker_version = (0, 0, 0)
 
     @classmethod
     async def list_devices(cls) -> Collection[CUDADevice]:
+        if not cls.enabled:
+            return []
         all_devices = []
         num_devices = libcudart.get_device_count()
         for dev_id in map(str, range(num_devices)):
@@ -112,6 +117,8 @@ class CUDAPlugin(AbstractComputePlugin):
 
     @classmethod
     async def generate_docker_args(cls, docker, device_alloc):
+        if not cls.enabled:
+            return {}
         active_device_ids = set()
         for slot_type, per_device_alloc in device_alloc.items():
             for dev_id, alloc in per_device_alloc.items():
@@ -187,6 +194,8 @@ class CUDAPlugin(AbstractComputePlugin):
 
     @classmethod
     async def restore_from_container(cls, container, alloc_map):
+        if not cls.enabled:
+            return
         assert isinstance(alloc_map, DiscretePropertyAllocMap)
         resource_spec = await get_resource_spec_from_container(container)
         if resource_spec is None:
