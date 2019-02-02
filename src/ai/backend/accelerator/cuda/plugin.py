@@ -57,6 +57,7 @@ class CUDAPlugin(AbstractComputePlugin):
     key = 'cuda'
     slot_types = (
         ('cuda.device', 'count'),  # provided for legacy (not allocatable!)
+        ('cuda.shares', 'count'),
     )
 
     device_mask = []
@@ -94,6 +95,7 @@ class CUDAPlugin(AbstractComputePlugin):
             'cuda.smp': sum(dev.processing_units for dev in devices),
             'cuda.mem': f'{BinarySize(sum(dev.memory_size for dev in devices)):g}',
             'cuda.device': len(devices),
+            'cuda.shares': 0,
         }
         return slots
 
