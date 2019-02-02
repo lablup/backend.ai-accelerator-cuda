@@ -189,8 +189,7 @@ class CUDAPlugin(AbstractComputePlugin):
     async def restore_from_container(cls, container, alloc_map):
         assert isinstance(alloc_map, DiscretePropertyAllocMap)
         resource_spec = await get_resource_spec_from_container(container)
-        print(resource_spec)
         if resource_spec is None:
             return
         alloc_map.allocations['cuda.device'].update(
-            resource_spec.allocations['cuda']['cuda.device'])
+            resource_spec.allocations['cuda'].get('cuda.device', {}))
