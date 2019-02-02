@@ -11,6 +11,7 @@ import aiohttp
 from ai.backend.agent.resources import (
     AbstractComputeDevice, AbstractComputePlugin, AbstractAllocMap,
     DiscretePropertyAllocMap,
+    get_resource_spec_from_container,
 )
 from ai.backend.common.logging import BraceStyleAdapter
 from ai.backend.common.types import BinarySize
@@ -39,7 +40,7 @@ async def init(etcd):
         return
     device_mask = await etcd.get('config/plugins/cuda/device_mask')
     if device_mask is not None:
-        CUDAPlugin.device_mask = [*map(int, device_mask.split(','))]
+        CUDAPlugin.device_mask = [*device_mask.split(',')]
     detected_devices = await CUDAPlugin.list_devices()
     log.info('detected devices:\n' + pformat(detected_devices))
     log.info('nvidia-docker version: {}', CUDAPlugin.nvdocker_version)
@@ -67,10 +68,10 @@ class CUDAPlugin(AbstractComputePlugin):
     async def list_devices(cls) -> Collection[CUDADevice]:
         all_devices = []
         num_devices = libcudart.get_device_count()
-        for dev_idx in range(num_devices):
-            if dev_idx in cls.device_mask:
+        for dev_id in map(str, range(num_devices)):
+            if dev_id in cls.device_mask:
                 continue
-            raw_info = libcudart.get_device_props(dev_idx)
+            raw_info = libcudart.get_device_props(int(dev_id))
             sysfs_node_path = "/sys/bus/pci/devices/" \
                               f"{raw_info['pciBusID_str'].lower()}/numa_node"
             try:
@@ -78,7 +79,7 @@ class CUDAPlugin(AbstractComputePlugin):
             except OSError:
                 node = None
             dev_info = CUDADevice(
-                device_id=dev_idx,
+                device_id=dev_id,
                 hw_location=raw_info['pciBusID_str'],
                 numa_node=node,
                 memory_size=raw_info['totalGlobalMem'],
@@ -156,8 +157,8 @@ class CUDAPlugin(AbstractComputePlugin):
                     # (e.g., nvidiactl, nvidia-uvm, ... etc.)
                     devices.append(dev)
                     continue
-                dev_idx = int(m.group(1))
-                if dev_idx not in active_device_ids:
+                dev_id = m.group(1)
+                if dev_id not in active_device_ids:
                     continue
                 devices.append(dev)
             devices = [{
@@ -172,8 +173,7 @@ class CUDAPlugin(AbstractComputePlugin):
                 },
             }
         elif cls.nvdocker_version[0] == 2:
-            device_list_str = ','.join(
-                map(str, sorted(active_device_ids)))
+            device_list_str = ','.join(sorted(active_device_ids))
             return {
                 'HostConfig': {
                     'Runtime': 'nvidia',
@@ -187,5 +187,10 @@ class CUDAPlugin(AbstractComputePlugin):
 
     @classmethod
     async def restore_from_container(cls, container, alloc_map):
-        # TODO: implement!
-        pass
+        assert isinstance(alloc_map, DiscretePropertyAllocMap)
+        resource_spec = await get_resource_spec_from_container(container)
+        print(resource_spec)
+        if resource_spec is None:
+            return
+        alloc_map.allocations['cuda.device'].update(
+            resource_spec.allocations['cuda']['cuda.device'])
