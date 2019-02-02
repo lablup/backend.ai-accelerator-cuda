@@ -56,8 +56,7 @@ class CUDAPlugin(AbstractComputePlugin):
 
     key = 'cuda'
     slot_types = (
-        ('cuda.device', 'count'),  # provided for legacy (not allocatable!)
-        ('cuda.shares', 'count'),
+        ('cuda.device', 'count'),
     )
 
     device_mask = []
@@ -92,10 +91,10 @@ class CUDAPlugin(AbstractComputePlugin):
     async def available_slots(cls) -> Mapping[str, str]:
         devices = await cls.list_devices()
         slots = {
-            'cuda.smp': sum(dev.processing_units for dev in devices),
-            'cuda.mem': f'{BinarySize(sum(dev.memory_size for dev in devices)):g}',
+            # TODO: move to physical device info reports
+            # 'cuda.smp': sum(dev.processing_units for dev in devices),
+            # 'cuda.mem': f'{BinarySize(sum(dev.memory_size for dev in devices)):g}',
             'cuda.device': len(devices),
-            'cuda.shares': 0,
         }
         return slots
 
