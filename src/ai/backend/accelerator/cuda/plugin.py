@@ -201,4 +201,4 @@ class CUDAPlugin(AbstractComputePlugin):
         if resource_spec is None:
             return
         alloc_map.allocations['cuda.device'].update(
-            resource_spec.allocations['cuda'].get('cuda.device', {}))
+            resource_spec.allocations.get('cuda', {}).get('cuda.device', {}))
