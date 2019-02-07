@@ -14,7 +14,6 @@ from ai.backend.agent.resources import (
     get_resource_spec_from_container,
 )
 from ai.backend.common.logging import BraceStyleAdapter
-from ai.backend.common.types import BinarySize
 from .nvidia import libcudart
 
 log = BraceStyleAdapter(logging.getLogger('ai.backend.accelerator.cuda'))
