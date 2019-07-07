@@ -9,6 +9,13 @@ available to Backend.AI kernel sessions.
 $ pip install backend.ai-accelerator-cuda
 ```
 
-**NOTICE:** The accelerator plugin API is currently under development and may change
-with the Backend.AI agents without prior notices.  This means this plugin may stop
-working suddenly and it is your responsibility to keep it up to date.
+This open-source edition of CUDA plugins support allocation of one or more CUDA
+devices to a container, slot-by-slot.
+
+Compatibility Matrix
+--------------------
+
+| Backend.AI | CUDA Plugin |
+|:----------:|:-----------:|
+|  19.06.x   |   0.11.x    |
+|  19.03.x   |   0.10.x    |
