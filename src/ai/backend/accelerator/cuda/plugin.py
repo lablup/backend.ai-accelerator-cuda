@@ -13,13 +13,17 @@ from ai.backend.agent.resources import (
     DiscretePropertyAllocMap,
     get_resource_spec_from_container,
 )
+from ai.backend.agent.stats import (
+    StatContext, NodeMeasurement, ContainerMeasurement
+)
 from ai.backend.common.logging import BraceStyleAdapter
+from . import __version__
 from .nvidia import libcudart
 
 log = BraceStyleAdapter(logging.getLogger('ai.backend.accelerator.cuda'))
 
 
-async def init(etcd):
+async def init(config: Mapping[str, str]):
     try:
         ret = subprocess.run(['nvidia-docker', 'version'],
                              stdout=subprocess.PIPE)
@@ -39,13 +43,22 @@ async def init(etcd):
         log.info('CUDA acceleration is disabled.')
         CUDAPlugin.enabled = False
         return CUDAPlugin
-    device_mask = await etcd.get('config/plugins/cuda/device_mask')
+    device_mask = await config.get('device_mask')
     if device_mask is not None:
         CUDAPlugin.device_mask = [*device_mask.split(',')]
-    detected_devices = await CUDAPlugin.list_devices()
-    log.info('detected devices:\n' + pformat(detected_devices))
-    log.info('nvidia-docker version: {}', CUDAPlugin.nvdocker_version)
-    log.info('CUDA acceleration is enabled.')
+    try:
+        detected_devices = await CUDAPlugin.list_devices()
+        log.info('detected devices:\n' + pformat(detected_devices))
+        log.info('nvidia-docker version: {}', CUDAPlugin.nvdocker_version)
+        log.info('CUDA acceleration is enabled.')
+    except ImportError:
+        log.warning('could not load the CUDA runtime library.')
+        log.info('CUDA acceleration is disabled.')
+        CUDAPlugin.enabled = False
+    except RuntimeError as e:
+        log.warning('CUDA init error: {}', e)
+        log.info('CUDA acceleration is disabled.')
+        CUDAPlugin.enabled = False
     return CUDAPlugin
 
 
@@ -102,6 +115,34 @@ class CUDAPlugin(AbstractComputePlugin):
             'cuda.device': len(devices),
         }
         return slots
+
+    @classmethod
+    def get_version(cls) -> str:
+        return __version__
+
+    @classmethod
+    async def extra_info(cls) -> Mapping[str, str]:
+        if cls.enabled:
+            try:
+                return {
+                    'cuda_support': True,
+                    'cuda_version': '{0[0]}.{0[1]}'.format(libcudart.get_version()),
+                }
+            except (RuntimeError, ImportError):
+                cls.enabled = False
+        return {
+            'cuda_support': False,
+        }
+
+    @classmethod
+    async def gather_node_measures(cls, ctx: StatContext) \
+                                  -> Sequence[NodeMeasurement]:
+        return []
+
+    @classmethod
+    async def gather_container_measures(cls, ctx: StatContext) \
+                                       -> Sequence[ContainerMeasurement]:
+        return []
 
     @classmethod
     async def create_alloc_map(cls) -> AbstractAllocMap:
