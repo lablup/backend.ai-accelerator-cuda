@@ -4,7 +4,7 @@ import platform
 
 # ref: https://developer.nvidia.com/cuda-toolkit-archive
 TARGET_CUDA_VERSIONS = (
-    (10, 0),
+    (10, 1), (10, 0),
     (9, 2), (9, 1), (9, 0),
     (8, 0),
     (7, 5), (7, 0),
