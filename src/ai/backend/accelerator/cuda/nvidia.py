@@ -1,4 +1,11 @@
+from abc import ABCMeta, abstractmethod
 import ctypes
+from typing import (
+    Any, Union,
+    Tuple, NamedTuple,
+    MutableMapping,
+    Type,
+)
 import platform
 
 
@@ -14,11 +21,31 @@ TARGET_CUDA_VERSIONS = (
 )
 
 
+class LibraryError(RuntimeError):
+
+    lib: str
+    func: str
+    code: int
+
+    def __init__(self, lib: str, func: str, code: int):
+        super().__init__(lib, func, code)
+        self.lib = lib
+        self.func = func
+        self.code = code
+
+    def __str__(self):
+        return f'LibraryError: {self.lib}::{self.func}() returned error {self.code}'
+
+    def __repr__(self):
+        args = ', '.join(map(repr, self.args))
+        return f'LibraryError({args})'
+
+
 class cudaDeviceProp_v10(ctypes.Structure):
     _fields_ = [
         ('name', ctypes.c_char * 256),
-        ('uuid', ctypes.c_char * 16),  # cudaUUID_t
-        ('luid', ctypes.c_char * 8),
+        ('uuid', ctypes.c_byte * 16),  # cudaUUID_t
+        ('luid', ctypes.c_byte * 8),
         ('luidDeviceNodeMask', ctypes.c_uint),
         ('totalGlobalMem', ctypes.c_size_t),
         ('sharedMemPerBlock', ctypes.c_size_t),
@@ -81,6 +108,7 @@ class cudaDeviceProp_v10(ctypes.Structure):
         ('managedMemSupported', ctypes.c_int),
         ('isMultiGpuBoard', ctypes.c_int),
         ('multiGpuBoardGroupID', ctypes.c_int),
+        ('hostNativeAtomicSupported', ctypes.c_int),
         ('singleToDoublePrecisionPerfRatio', ctypes.c_int),
         ('pageableMemoryAccess', ctypes.c_int),
         ('concurrentManagedAccess', ctypes.c_int),
@@ -90,7 +118,6 @@ class cudaDeviceProp_v10(ctypes.Structure):
         ('cooperativeMultiDeviceLaunch', ctypes.c_int),
         ('pageableMemoryAccessUsesHostPageTables', ctypes.c_int),
         ('directManagedMemAccessFromHost', ctypes.c_int),
-        ('_reserved', ctypes.c_int * 128),
     ]
 
 
@@ -167,7 +194,6 @@ class cudaDeviceProp(ctypes.Structure):
         ('cooperativeMultiDeviceLaunch', ctypes.c_int),
         ('pageableMemoryAccessUsesHostPageTables', ctypes.c_int),
         ('directManagedMemAccessFromHost', ctypes.c_int),
-        ('_reserved', ctypes.c_int * 128),
     ]
 
 
@@ -182,90 +208,218 @@ def _load_library(name):
     return None
 
 
-def _load_libcudart():
-    """
-    Return the ctypes.DLL object for cudart or None
-    """
-    system_type = platform.system()
-    if system_type == 'Windows':
-        arch = platform.architecture()[0]
-        for major, minor in TARGET_CUDA_VERSIONS:
-            ver = f'{major}{minor}'
-            cudart = _load_library('cudart%s_%d.dll' % (arch[:2], ver))
-            if cudart is not None:
-                return cudart
-    elif system_type == 'Darwin':
-        for major, minor in TARGET_CUDA_VERSIONS:
-            cudart = _load_library('libcudart.%d.%d.dylib' % (major, minor))
-            if cudart is not None:
-                return cudart
-        return _load_library('libcudart.dylib')
-    else:
-        for major, minor in TARGET_CUDA_VERSIONS:
-            cudart = _load_library('libcudart.so.%d.%d' % (major, minor))
-            if cudart is not None:
-                return cudart
-        return _load_library('libcudart.so')
-    return None
+class LibraryBase(metaclass=ABCMeta):
 
-
-class libcudart:
+    name = 'LIBRARY'
 
     _lib = None
-    _version = None
+
+    @classmethod
+    @abstractmethod
+    def load_library(cls) -> ctypes.CDLL:
+        pass
 
     @classmethod
     def _ensure_lib(cls):
         if cls._lib is None:
-            cls._lib = _load_libcudart()
-            raw_ver = ctypes.c_int()
-            cls.invoke_lib('cudaRuntimeGetVersion', ctypes.byref(raw_ver))
-            cls._version = (raw_ver.value // 1000, (raw_ver.value % 100) // 10)
+            cls._lib = cls.load_library()
         if cls._lib is None:
-            raise ImportError('CUDA runtime is not available!')
+            raise ImportError(f'Could not load the {cls.name} library!')
 
     @classmethod
-    def invoke_lib(cls, func_name, *args):
-        cls._ensure_lib()
+    def invoke(cls, func_name, *args, check_rc=True):
+        try:
+            cls._ensure_lib()
+        except ImportError:
+            raise
         func = getattr(cls._lib, func_name)
         rc = func(*args)
-        if rc != 0:
-            raise RuntimeError(f'CUDA API error: {func_name}() returned {rc}')
-        return 0
+        if check_rc and rc != 0:
+            raise LibraryError(cls.name, func_name, rc)
+        return rc
+
+
+class libcudart(LibraryBase):
+
+    name = 'CUDART'
+
+    _version = (0, 0)
+
+    @classmethod
+    def load_library(cls):
+        system_type = platform.system()
+        if system_type == 'Windows':
+            arch = platform.architecture()[0]
+            for major, minor in TARGET_CUDA_VERSIONS:
+                ver = f'{major}{minor}'
+                cudart = _load_library('cudart%s_%d.dll' % (arch[:2], ver))
+                if cudart is not None:
+                    return cudart
+        elif system_type == 'Darwin':
+            for major, minor in TARGET_CUDA_VERSIONS:
+                cudart = _load_library('libcudart.%d.%d.dylib' % (major, minor))
+                if cudart is not None:
+                    return cudart
+            return _load_library('libcudart.dylib')
+        else:
+            for major, minor in TARGET_CUDA_VERSIONS:
+                cudart = _load_library('libcudart.so.%d.%d' % (major, minor))
+                if cudart is not None:
+                    return cudart
+            return _load_library('libcudart.so')
+        return None
+
+    @classmethod
+    def get_version(cls) -> Tuple[int, int]:
+        if cls._version == (0, 0):
+            raw_ver = ctypes.c_int()
+            cls.invoke('cudaRuntimeGetVersion', ctypes.byref(raw_ver))
+            cls._version = (raw_ver.value // 1000, (raw_ver.value % 100) // 10)
+        return cls._version
 
     @classmethod
     def get_device_count(cls) -> int:
         count = ctypes.c_int()
-        try:
-            cls.invoke_lib('cudaGetDeviceCount', ctypes.byref(count))
-        except ImportError:
-            return 0
+        cls.invoke('cudaGetDeviceCount', ctypes.byref(count))
         return count.value
 
     @classmethod
-    def get_version(cls) -> int:
-        version = ctypes.c_int()
-        try:
-            cls.invoke_lib('cudaRuntimeGetVersion', ctypes.byref(version))
-        except ImportError:
-            return 0
-        return version.value
-
-    @classmethod
-    def get_device_props(cls, dev_idx: int):
-        if cls._version >= (10, 0):
+    def get_device_props(cls, device_idx: int):
+        prop_type: Union[Type[cudaDeviceProp_v10], Type[cudaDeviceProp]]
+        props_struct: Union[cudaDeviceProp_v10, cudaDeviceProp]
+        if cls.get_version() >= (10, 0):
             prop_type = cudaDeviceProp_v10
-            props = cudaDeviceProp_v10()
+            props_struct = cudaDeviceProp_v10()
         else:
             prop_type = cudaDeviceProp
-            props = cudaDeviceProp()
-        cls.invoke_lib('cudaGetDeviceProperties', ctypes.byref(props), dev_idx)
-        props = {
-            k: getattr(props, k) for k, _ in prop_type._fields_
+            props_struct = cudaDeviceProp()
+        cls.invoke('cudaGetDeviceProperties', ctypes.byref(props_struct), device_idx)
+        props: MutableMapping[str, Any] = {
+            k: getattr(props_struct, k) for k, _ in prop_type._fields_
         }
         pci_bus_id = b' ' * 16
-        cls.invoke_lib('cudaDeviceGetPCIBusId',
-                       ctypes.c_char_p(pci_bus_id), 16, dev_idx)
+        cls.invoke('cudaDeviceGetPCIBusId',
+                   ctypes.c_char_p(pci_bus_id), 16, device_idx)
         props['name'] = props['name'].decode()
         props['pciBusID_str'] = pci_bus_id.split(b'\x00')[0].decode()
+        if 'uuid' in props:
+            props['uuid'] = bytes(props['uuid'])
+        if 'luid' in props:
+            props['luid'] = bytes(props['luid'])
         return props
+
+    @classmethod
+    def reset(cls):
+        '''
+        Releases the underlying CUDA driver context and resources occupied by it.
+        '''
+        cls.invoke('cudaDeviceReset')
+
+
+class nvmlMemoryInfo_t(ctypes.Structure):
+    _fields_ = [
+        ('total', ctypes.c_uint),
+        ('free', ctypes.c_ulonglong),
+        ('used', ctypes.c_ulonglong),
+    ]
+
+
+class nvmlUtilization_t(ctypes.Structure):
+    _fields_ = [
+        ('gpu', ctypes.c_uint),     # percent of unit time for GPU core used
+        ('memory', ctypes.c_uint),  # percent of unit time for GPU memory I/O
+    ]
+
+
+class nvmlProcessInfo_t(ctypes.Structure):
+    _fields_ = [
+        ('pid', ctypes.c_int),
+        ('used_gpu_memory', ctypes.c_ulonglong),
+    ]
+
+
+NVML_INIT_FLAG_NO_GPUS = 1    # allow init without GPUs
+NVML_INIT_FLAG_NO_ATTACH = 2  # do not attach the GPUs on init
+
+
+class DeviceStat(NamedTuple):
+    device_idx: int
+    mem_total: int
+    mem_used: int
+    mem_free: int
+    gpu_util: int
+    mem_util: int
+
+
+class libnvml(LibraryBase):
+
+    name = 'NVML'
+
+    _initialized = False
+
+    @classmethod
+    def load_library(cls):
+        system_type = platform.system()
+        if system_type == 'Windows':
+            return _load_library('libnvidia-ml.dll')
+        elif system_type == 'Darwin':
+            return _load_library('libnvidia-ml.dylib')
+        else:
+            return _load_library('libnvidia-ml.so')
+        return None
+
+    @classmethod
+    def ensure_init(cls):
+        if not cls._initialized:
+            cls.invoke('nvmlInit', NVML_INIT_FLAG_NO_GPUS)
+            cls._initialized = True
+
+    @classmethod
+    def shutdown(cls):
+        if cls._initialized:
+            cls.invoke('nvmlShutdown')
+
+    @classmethod
+    def get_driver_version(cls) -> str:
+        cls.ensure_init()
+        buffer = (ctypes.c_char * 80)()
+        cls.invoke('nvmlSystemGetDriverVersion', ctypes.byref(buffer), 80)
+        return buffer.value.decode()
+
+    @classmethod
+    def get_version(cls) -> str:
+        cls.ensure_init()
+        buffer = (ctypes.c_char * 80)()
+        cls.invoke('nvmlSystemGetNVMLVersion', ctypes.byref(buffer), 80)
+        return buffer.value.decode()
+
+    @classmethod
+    def get_device_count(cls) -> int:
+        cls.ensure_init()
+        count = ctypes.c_uint()
+        cls.invoke('nvmlDeviceGetCount', ctypes.byref(count))
+        return count.value
+
+    @classmethod
+    def get_device_stats(cls, device_idx: int) -> DeviceStat:
+        '''
+        Returns the current usage information of the given CUDA device.
+        '''
+        cls.ensure_init()
+        handle = ctypes.c_void_p()
+        mem_info = nvmlMemoryInfo_t()
+        util_info = nvmlUtilization_t()
+        cls.invoke('nvmlDeviceGetHandleByIndex_v2',
+                   device_idx, ctypes.byref(handle))
+        cls.invoke('nvmlDeviceGetMemoryInfo',
+                   handle, ctypes.byref(mem_info))
+        cls.invoke('nvmlDeviceGetUtilizationRates',
+                   handle, ctypes.byref(util_info))
+        return DeviceStat(
+            device_idx=device_idx,
+            mem_total=mem_info.total,
+            mem_used=mem_info.used,
+            mem_free=mem_info.free,
+            gpu_util=util_info.gpu,
+            mem_util=util_info.memory,
+        )
