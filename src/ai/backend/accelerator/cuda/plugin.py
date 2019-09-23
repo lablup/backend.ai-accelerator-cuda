@@ -1,24 +1,50 @@
+from decimal import Decimal
 import subprocess
 import logging
 from pathlib import Path
 from pprint import pformat
 import re
-from typing import Collection, Mapping, Sequence
+from typing import (
+    Any, Optional,
+    Collection, Set,
+    Mapping, MutableMapping,
+    Sequence, List,
+    Tuple,
+)
+import uuid
 
 import attr
 import aiohttp
 
-from ai.backend.agent.resources import (
-    AbstractComputeDevice, AbstractComputePlugin, AbstractAllocMap,
-    DiscretePropertyAllocMap,
-    get_resource_spec_from_container,
-)
-from ai.backend.agent.stats import (
-    StatContext, NodeMeasurement, ContainerMeasurement
-)
 from ai.backend.common.logging import BraceStyleAdapter
+from ai.backend.agent.resources import (
+    AbstractComputeDevice, AbstractComputePlugin,
+    AbstractAllocMap, DiscretePropertyAllocMap,
+)
+try:
+    from ai.backend.agent.resources import get_resource_spec_from_container  # type: ignore
+except ImportError:
+    from ai.backend.agent.docker.resources import get_resource_spec_from_container
+from ai.backend.agent.stats import (
+    StatContext, MetricTypes,
+    NodeMeasurement, ContainerMeasurement, Measurement,
+)
+from ai.backend.common.types import (
+    BinarySize, MetricKey,
+    DeviceName, DeviceId, DeviceModelInfo,
+    SlotName, SlotTypes,
+)
 from . import __version__
-from .nvidia import libcudart
+from .nvidia import libcudart, libnvml, LibraryError
+
+__all__ = (
+    'PREFIX',
+    'CUDADevice',
+    'CUDAPlugin',
+    'init',
+)
+
+PREFIX = 'cuda'
 
 log = BraceStyleAdapter(logging.getLogger('ai.backend.accelerator.cuda'))
 
@@ -43,9 +69,11 @@ async def init(config: Mapping[str, str]):
         log.info('CUDA acceleration is disabled.')
         CUDAPlugin.enabled = False
         return CUDAPlugin
-    device_mask = await config.get('device_mask')
-    if device_mask is not None:
-        CUDAPlugin.device_mask = [*device_mask.split(',')]
+    raw_device_mask = config.get('device_mask')
+    if raw_device_mask is not None:
+        CUDAPlugin.device_mask = [
+            *map(lambda dev_id: DeviceId(dev_id), raw_device_mask.split(','))
+        ]
     try:
         detected_devices = await CUDAPlugin.list_devices()
         log.info('detected devices:\n' + pformat(detected_devices))
@@ -64,20 +92,21 @@ async def init(config: Mapping[str, str]):
 
 @attr.s(auto_attribs=True)
 class CUDADevice(AbstractComputeDevice):
-    pass
+    model_name: str
+    uuid: str
 
 
 class CUDAPlugin(AbstractComputePlugin):
 
-    key = 'cuda'
-    slot_types = (
-        ('cuda.device', 'count'),
+    key = DeviceName('cuda')
+    slot_types: Sequence[Tuple[SlotName, SlotTypes]] = (
+        (SlotName('cuda.device'), SlotTypes('count')),
     )
 
-    device_mask = []
-    enabled = True
+    device_mask: Sequence[DeviceId] = []
+    enabled: bool = True
 
-    nvdocker_version = (0, 0, 0)
+    nvdocker_version: Tuple[int, ...] = (0, 0, 0)
 
     @classmethod
     async def list_devices(cls) -> Collection[CUDADevice]:
@@ -85,63 +114,111 @@ class CUDAPlugin(AbstractComputePlugin):
             return []
         all_devices = []
         num_devices = libcudart.get_device_count()
-        for dev_id in map(str, range(num_devices)):
+        for dev_id in map(lambda idx: DeviceId(str(idx)), range(num_devices)):
             if dev_id in cls.device_mask:
                 continue
             raw_info = libcudart.get_device_props(int(dev_id))
             sysfs_node_path = "/sys/bus/pci/devices/" \
                               f"{raw_info['pciBusID_str'].lower()}/numa_node"
+            node: Optional[int]
             try:
                 node = int(Path(sysfs_node_path).read_text().strip())
             except OSError:
                 node = None
+            dev_uuid, raw_dev_uuid = None, raw_info.get('uuid', None)
+            if raw_dev_uuid is not None:
+                dev_uuid = str(uuid.UUID(bytes=raw_dev_uuid))
+            else:
+                dev_uuid = '00000000-0000-0000-0000-000000000000'
             dev_info = CUDADevice(
                 device_id=dev_id,
                 hw_location=raw_info['pciBusID_str'],
                 numa_node=node,
                 memory_size=raw_info['totalGlobalMem'],
                 processing_units=raw_info['multiProcessorCount'],
+                model_name=raw_info['name'],
+                uuid=dev_uuid,
             )
             all_devices.append(dev_info)
         return all_devices
 
     @classmethod
-    async def available_slots(cls) -> Mapping[str, str]:
+    async def available_slots(cls) -> Mapping[SlotName, Decimal]:
         devices = await cls.list_devices()
-        slots = {
-            # TODO: move to physical device info reports
-            # 'cuda.smp': sum(dev.processing_units for dev in devices),
-            # 'cuda.mem': f'{BinarySize(sum(dev.memory_size for dev in devices)):g}',
-            'cuda.device': len(devices),
+        return {
+            SlotName('cuda.device'): Decimal(len(devices)),
         }
-        return slots
 
     @classmethod
     def get_version(cls) -> str:
         return __version__
 
     @classmethod
-    async def extra_info(cls) -> Mapping[str, str]:
+    async def extra_info(cls) -> Mapping[str, Any]:
         if cls.enabled:
             try:
                 return {
                     'cuda_support': True,
+                    'nvidia_version': libnvml.get_driver_version(),
                     'cuda_version': '{0[0]}.{0[1]}'.format(libcudart.get_version()),
                 }
-            except (RuntimeError, ImportError):
+            except (LibraryError, ImportError):
                 cls.enabled = False
         return {
             'cuda_support': False,
         }
 
     @classmethod
-    async def gather_node_measures(cls, ctx: StatContext) \
-                                  -> Sequence[NodeMeasurement]:
-        return []
+    async def gather_node_measures(
+            cls, ctx: StatContext,
+            ) -> Sequence[NodeMeasurement]:
+        dev_count = 0
+        mem_avail_total = 0
+        mem_used_total = 0
+        mem_stats = {}
+        util_total = 0
+        util_stats = {}
+        if cls.enabled:
+            try:
+                dev_count = libnvml.get_device_count()
+                for dev_id in map(lambda idx: DeviceId(str(idx)), range(dev_count)):
+                    if dev_id in cls.device_mask:
+                        continue
+                    dev_stat = libnvml.get_device_stats(int(dev_id))
+                    mem_avail_total += dev_stat.mem_total
+                    mem_used_total += dev_stat.mem_used
+                    mem_stats[dev_id] = Measurement(Decimal(dev_stat.mem_used),
+                                                    Decimal(dev_stat.mem_total))
+                    util_total += dev_stat.gpu_util
+                    util_stats[dev_id] = Measurement(Decimal(dev_stat.gpu_util), Decimal(100))
+            except (LibraryError, ImportError):
+                # libnvml is not installed.
+                # Return an empty result.
+                cls.enabled = False
+        return [
+            NodeMeasurement(
+                MetricKey('cuda_mem'),
+                MetricTypes.USAGE,
+                unit_hint='bytes',
+                stats_filter=frozenset({'max'}),
+                per_node=Measurement(Decimal(mem_used_total), Decimal(mem_avail_total)),
+                per_device=mem_stats,
+            ),
+            NodeMeasurement(
+                MetricKey('cuda_util'),
+                MetricTypes.USAGE,
+                unit_hint='percent',
+                stats_filter=frozenset({'avg', 'max'}),
+                per_node=Measurement(Decimal(util_total), Decimal(dev_count * 100)),
+                per_device=util_stats,
+            ),
+        ]
 
     @classmethod
-    async def gather_container_measures(cls, ctx: StatContext) \
-                                       -> Sequence[ContainerMeasurement]:
+    async def gather_container_measures(
+            cls, ctx: StatContext,
+            container_ids: Sequence[str],
+            ) -> Sequence[ContainerMeasurement]:
         return []
 
     @classmethod
@@ -233,12 +310,59 @@ class CUDAPlugin(AbstractComputePlugin):
             raise RuntimeError('BUG: should not be reached here!')
 
     @classmethod
-    async def restore_from_container(cls, container, alloc_map):
+    async def get_attached_devices(
+            cls, device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
+            ) -> Sequence[DeviceModelInfo]:
+        device_ids: List[DeviceId] = []
+        if SlotName('cuda.devices') in device_alloc:
+            device_ids.extend(device_alloc[SlotName('cuda.devices')].keys())
+        available_devices = await cls.list_devices()
+        attached_devices: List[DeviceModelInfo] = []
+        for device in available_devices:
+            if device.device_id in device_ids:
+                proc = device.processing_units
+                mem = BinarySize(device.memory_size)
+                attached_devices.append({  # TODO: update common.types.DeviceModelInfo
+                    'device_id': device.device_id,
+                    'model_name': device.model_name,
+                    'smp': proc,
+                    'mem': mem,
+                })
+        return attached_devices
+
+    @classmethod
+    async def restore_from_container(
+            cls, container,
+            alloc_map: AbstractAllocMap,
+            ) -> None:
         if not cls.enabled:
             return
-        assert isinstance(alloc_map, DiscretePropertyAllocMap)
         resource_spec = await get_resource_spec_from_container(container)
         if resource_spec is None:
             return
-        alloc_map.allocations['cuda.device'].update(
-            resource_spec.allocations.get('cuda', {}).get('cuda.device', {}))
+        alloc_map.allocations[SlotName('cuda.device')].update(
+            resource_spec.allocations.get(
+                DeviceName('cuda'), {}
+            ).get(
+                SlotName('cuda.device'), {}
+            )
+        )
+
+    @classmethod
+    async def generate_resource_data(
+            cls, device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
+            ) -> Mapping[str, str]:
+        data: MutableMapping[str, str] = {}
+        if not cls.enabled:
+            return data
+
+        active_device_id_set: Set[DeviceId] = set()
+        for slot_type, per_device_alloc in device_alloc.items():
+            for dev_id, alloc in per_device_alloc.items():
+                if alloc > 0:
+                    active_device_id_set.add(dev_id)
+        active_device_ids = sorted(active_device_id_set, key=lambda v: int(v))
+        data['CUDA_GLOBAL_DEVICE_IDS'] = ','.join(
+            f'{local_idx}:{global_id}'
+            for local_idx, global_id in enumerate(active_device_ids))
+        return data
