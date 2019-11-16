@@ -233,7 +233,9 @@ class CUDAPlugin(AbstractComputePlugin):
         return []
 
     @classmethod
-    async def generate_docker_args(cls, docker, device_alloc):
+    async def generate_docker_args(cls, docker,
+                                   device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]]) \
+                                   -> Mapping[str, Any]:
         if not cls.enabled:
             return {}
         active_device_ids = set()
