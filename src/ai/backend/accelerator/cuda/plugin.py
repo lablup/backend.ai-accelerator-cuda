@@ -162,8 +162,10 @@ class CUDAPlugin(AbstractComputePlugin):
                     'nvidia_version': libnvml.get_driver_version(),
                     'cuda_version': '{0[0]}.{0[1]}'.format(libcudart.get_version()),
                 }
-            except (LibraryError, ImportError):
-                cls.enabled = False
+            except ImportError:
+                log.warning('extra_info(): NVML/CUDA runtime library is not found')
+            except LibraryError as e:
+                log.warning('extra_info(): {!r}', e)
         return {
             'cuda_support': False,
         }
@@ -191,10 +193,10 @@ class CUDAPlugin(AbstractComputePlugin):
                                                     Decimal(dev_stat.mem_total))
                     util_total += dev_stat.gpu_util
                     util_stats[dev_id] = Measurement(Decimal(dev_stat.gpu_util), Decimal(100))
-            except (LibraryError, ImportError):
-                # libnvml is not installed.
-                # Return an empty result.
-                cls.enabled = False
+            except ImportError:
+                log.warning('gather_node_measure(): NVML library is not found')
+            except LibraryError as e:
+                log.warning('gather_node_measure(): {!r}', e)
         return [
             NodeMeasurement(
                 MetricKey('cuda_mem'),
@@ -342,13 +344,22 @@ class CUDAPlugin(AbstractComputePlugin):
         resource_spec = await get_resource_spec_from_container(container)
         if resource_spec is None:
             return
-        alloc_map.allocations[SlotName('cuda.device')].update(
-            resource_spec.allocations.get(
-                DeviceName('cuda'), {}
-            ).get(
-                SlotName('cuda.device'), {}
+        if hasattr(alloc_map, 'apply_allocation'):
+            alloc_map.apply_allocation({
+                SlotName('cuda.device'): resource_spec.allocations.get(
+                    DeviceName('cuda'), {}
+                ).get(
+                    SlotName('cuda.device'), {}
+                ),
+            })
+        else:
+            alloc_map.allocations[SlotName('cuda.device')].update(
+                resource_spec.allocations.get(
+                    DeviceName('cuda'), {}
+                ).get(
+                    SlotName('cuda.device'), {}
+                )
             )
-        )
 
     @classmethod
     async def generate_resource_data(
