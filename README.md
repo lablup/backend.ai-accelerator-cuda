@@ -15,7 +15,8 @@ devices to a container, slot-by-slot.
 Compatibility Matrix
 --------------------
 
-| Backend.AI | CUDA Plugin |
-|:----------:|:-----------:|
-|  19.06.x   |   0.11.x    |
-|  19.03.x   |   0.10.x    |
+|     Backend.AI      |    CUDA Plugin   |
+|:-------------------:|:----------------:|
+|  19.12.x            |  0.12.x          |
+|  19.06.x, 19.09.x   |  0.11.x, 0.12.x  |
+|  19.03.x            |  0.10.x          |
