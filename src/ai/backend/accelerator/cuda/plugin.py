@@ -29,6 +29,7 @@ from ai.backend.agent.stats import (
     StatContext, MetricTypes,
     NodeMeasurement, ContainerMeasurement, Measurement,
 )
+from ai.backend.agent.types import Container
 from ai.backend.common.types import (
     BinarySize, MetricKey,
     DeviceName, DeviceId, DeviceModelInfo,
@@ -336,12 +337,12 @@ class CUDAPlugin(AbstractComputePlugin):
 
     @classmethod
     async def restore_from_container(
-            cls, container,
+            cls, container: Container,
             alloc_map: AbstractAllocMap,
             ) -> None:
         if not cls.enabled:
             return
-        resource_spec = await get_resource_spec_from_container(container)
+        resource_spec = await get_resource_spec_from_container(container.backend_obj)
         if resource_spec is None:
             return
         if hasattr(alloc_map, 'apply_allocation'):
