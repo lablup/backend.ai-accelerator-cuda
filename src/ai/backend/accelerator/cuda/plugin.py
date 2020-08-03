@@ -15,6 +15,7 @@ import uuid
 
 import attr
 import aiohttp
+import aiodocker
 
 from ai.backend.common.logging import BraceStyleAdapter
 from ai.backend.agent.resources import (
@@ -50,47 +51,6 @@ PREFIX = 'cuda'
 log = BraceStyleAdapter(logging.getLogger('ai.backend.accelerator.cuda'))
 
 
-async def init(config: Mapping[str, str]):
-    try:
-        ret = subprocess.run(['nvidia-docker', 'version'],
-                             stdout=subprocess.PIPE)
-    except FileNotFoundError:
-        log.warning('nvidia-docker is not installed.')
-        log.info('CUDA acceleration is disabled.')
-        CUDAPlugin.enabled = False
-        return CUDAPlugin
-    rx = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
-    for line in ret.stdout.decode().strip().splitlines():
-        m = rx.search(line)
-        if m is not None:
-            CUDAPlugin.nvdocker_version = tuple(map(int, m.group(1).split('.')))
-            break
-    else:
-        log.error('could not detect nvidia-docker version!')
-        log.info('CUDA acceleration is disabled.')
-        CUDAPlugin.enabled = False
-        return CUDAPlugin
-    raw_device_mask = config.get('device_mask')
-    if raw_device_mask is not None:
-        CUDAPlugin.device_mask = [
-            *map(lambda dev_id: DeviceId(dev_id), raw_device_mask.split(','))
-        ]
-    try:
-        detected_devices = await CUDAPlugin.list_devices()
-        log.info('detected devices:\n' + pformat(detected_devices))
-        log.info('nvidia-docker version: {}', CUDAPlugin.nvdocker_version)
-        log.info('CUDA acceleration is enabled.')
-    except ImportError:
-        log.warning('could not load the CUDA runtime library.')
-        log.info('CUDA acceleration is disabled.')
-        CUDAPlugin.enabled = False
-    except RuntimeError as e:
-        log.warning('CUDA init error: {}', e)
-        log.info('CUDA acceleration is disabled.')
-        CUDAPlugin.enabled = False
-    return CUDAPlugin
-
-
 @attr.s(auto_attribs=True)
 class CUDADevice(AbstractComputeDevice):
     model_name: str
@@ -99,24 +59,72 @@ class CUDADevice(AbstractComputeDevice):
 
 class CUDAPlugin(AbstractComputePlugin):
 
+    config_watch_enabled = False
+
     key = DeviceName('cuda')
     slot_types: Sequence[Tuple[SlotName, SlotTypes]] = (
         (SlotName('cuda.device'), SlotTypes('count')),
     )
+    nvdocker_version: Tuple[int, ...] = (0, 0, 0)
 
     device_mask: Sequence[DeviceId] = []
     enabled: bool = True
 
-    nvdocker_version: Tuple[int, ...] = (0, 0, 0)
+    async def init(self):
+        try:
+            ret = subprocess.run(['nvidia-docker', 'version'],
+                                 stdout=subprocess.PIPE)
+        except FileNotFoundError:
+            log.warning('nvidia-docker is not installed.')
+            log.info('CUDA acceleration is disabled.')
+            self.enabled = False
+            return
+        rx = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
+        for line in ret.stdout.decode().strip().splitlines():
+            m = rx.search(line)
+            if m is not None:
+                self.nvdocker_version = tuple(map(int, m.group(1).split('.')))
+                break
+        else:
+            log.error('could not detect nvidia-docker version!')
+            log.info('CUDA acceleration is disabled.')
+            self.enabled = False
+            return
+        raw_device_mask = self.plugin_config.get('device_mask')
+        if raw_device_mask is not None:
+            self.device_mask = [
+                *map(lambda dev_id: DeviceId(dev_id), raw_device_mask.split(','))
+            ]
+        try:
+            detected_devices = await self.list_devices()
+            log.info('detected devices:\n' + pformat(detected_devices))
+            log.info('nvidia-docker version: {}', self.nvdocker_version)
+            log.info('CUDA acceleration is enabled.')
+        except ImportError:
+            log.warning('could not load the CUDA runtime library.')
+            log.info('CUDA acceleration is disabled.')
+            self.enabled = False
+        except RuntimeError as e:
+            log.warning('CUDA init error: {}', e)
+            log.info('CUDA acceleration is disabled.')
+            self.enabled = False
 
-    @classmethod
-    async def list_devices(cls) -> Collection[CUDADevice]:
-        if not cls.enabled:
+    async def cleanup(self) -> None:
+        pass
+
+    async def update_plugin_config(
+        self,
+        new_plugin_config: Mapping[str, Any],
+    ) -> None:
+        pass
+
+    async def list_devices(self) -> Collection[CUDADevice]:
+        if not self.enabled:
             return []
         all_devices = []
         num_devices = libcudart.get_device_count()
         for dev_id in map(lambda idx: DeviceId(str(idx)), range(num_devices)):
-            if dev_id in cls.device_mask:
+            if dev_id in self.device_mask:
                 continue
             raw_info = libcudart.get_device_props(int(dev_id))
             sysfs_node_path = "/sys/bus/pci/devices/" \
@@ -143,20 +151,17 @@ class CUDAPlugin(AbstractComputePlugin):
             all_devices.append(dev_info)
         return all_devices
 
-    @classmethod
-    async def available_slots(cls) -> Mapping[SlotName, Decimal]:
-        devices = await cls.list_devices()
+    async def available_slots(self) -> Mapping[SlotName, Decimal]:
+        devices = await self.list_devices()
         return {
             SlotName('cuda.device'): Decimal(len(devices)),
         }
 
-    @classmethod
-    def get_version(cls) -> str:
+    def get_version(self) -> str:
         return __version__
 
-    @classmethod
-    async def extra_info(cls) -> Mapping[str, Any]:
-        if cls.enabled:
+    async def extra_info(self) -> Mapping[str, Any]:
+        if self.enabled:
             try:
                 return {
                     'cuda_support': True,
@@ -171,21 +176,21 @@ class CUDAPlugin(AbstractComputePlugin):
             'cuda_support': False,
         }
 
-    @classmethod
     async def gather_node_measures(
-            cls, ctx: StatContext,
-            ) -> Sequence[NodeMeasurement]:
+        self,
+        ctx: StatContext,
+    ) -> Sequence[NodeMeasurement]:
         dev_count = 0
         mem_avail_total = 0
         mem_used_total = 0
         mem_stats = {}
         util_total = 0
         util_stats = {}
-        if cls.enabled:
+        if self.enabled:
             try:
                 dev_count = libnvml.get_device_count()
                 for dev_id in map(lambda idx: DeviceId(str(idx)), range(dev_count)):
-                    if dev_id in cls.device_mask:
+                    if dev_id in self.device_mask:
                         continue
                     dev_stat = libnvml.get_device_stats(int(dev_id))
                     mem_avail_total += dev_stat.mem_total
@@ -217,36 +222,34 @@ class CUDAPlugin(AbstractComputePlugin):
             ),
         ]
 
-    @classmethod
     async def gather_container_measures(
-            cls, ctx: StatContext,
+            self, ctx: StatContext,
             container_ids: Sequence[str],
             ) -> Sequence[ContainerMeasurement]:
         return []
 
-    @classmethod
-    async def create_alloc_map(cls) -> AbstractAllocMap:
-        devices = await cls.list_devices()
+    async def create_alloc_map(self) -> AbstractAllocMap:
+        devices = await self.list_devices()
         return DiscretePropertyAllocMap(
             devices=devices,
             prop_func=lambda dev: 1)
 
-    @classmethod
-    async def get_hooks(cls, distro: str, arch: str) -> Sequence[Path]:
+    async def get_hooks(self, distro: str, arch: str) -> Sequence[Path]:
         return []
 
-    @classmethod
-    async def generate_docker_args(cls, docker,
-                                   device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]]) \
-                                   -> Mapping[str, Any]:
-        if not cls.enabled:
+    async def generate_docker_args(
+        self,
+        docker: aiodocker.Docker,
+        device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
+    ) -> Mapping[str, Any]:
+        if not self.enabled:
             return {}
         active_device_ids = set()
         for slot_type, per_device_alloc in device_alloc.items():
             for dev_id, alloc in per_device_alloc.items():
                 if alloc > 0:
                     active_device_ids.add(dev_id)
-        if cls.nvdocker_version[0] == 1:
+        if self.nvdocker_version[0] == 1:
             timeout = aiohttp.ClientTimeout(total=3)
             async with aiohttp.ClientSession(raise_for_status=True,
                                              timeout=timeout) as sess:
@@ -301,7 +304,7 @@ class CUDAPlugin(AbstractComputePlugin):
                     'Devices': devices,
                 },
             }
-        elif cls.nvdocker_version[0] == 2:
+        elif self.nvdocker_version[0] == 2:
             device_list_str = ','.join(sorted(active_device_ids))
             return {
                 'HostConfig': {
@@ -314,14 +317,14 @@ class CUDAPlugin(AbstractComputePlugin):
         else:
             raise RuntimeError('BUG: should not be reached here!')
 
-    @classmethod
     async def get_attached_devices(
-            cls, device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
-            ) -> Sequence[DeviceModelInfo]:
+        self,
+        device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
+    ) -> Sequence[DeviceModelInfo]:
         device_ids: List[DeviceId] = []
         if SlotName('cuda.devices') in device_alloc:
             device_ids.extend(device_alloc[SlotName('cuda.devices')].keys())
-        available_devices = await cls.list_devices()
+        available_devices = await self.list_devices()
         attached_devices: List[DeviceModelInfo] = []
         for device in available_devices:
             if device.device_id in device_ids:
@@ -335,12 +338,12 @@ class CUDAPlugin(AbstractComputePlugin):
                 })
         return attached_devices
 
-    @classmethod
     async def restore_from_container(
-            cls, container: Container,
-            alloc_map: AbstractAllocMap,
-            ) -> None:
-        if not cls.enabled:
+        self,
+        container: Container,
+        alloc_map: AbstractAllocMap,
+    ) -> None:
+        if not self.enabled:
             return
         resource_spec = await get_resource_spec_from_container(container.backend_obj)
         if resource_spec is None:
@@ -362,12 +365,12 @@ class CUDAPlugin(AbstractComputePlugin):
                 )
             )
 
-    @classmethod
     async def generate_resource_data(
-            cls, device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
-            ) -> Mapping[str, str]:
+        self,
+        device_alloc: Mapping[SlotName, Mapping[DeviceId, Decimal]],
+    ) -> Mapping[str, str]:
         data: MutableMapping[str, str] = {}
-        if not cls.enabled:
+        if not self.enabled:
             return data
 
         active_device_id_set: Set[DeviceId] = set()
