@@ -70,7 +70,7 @@ class CUDAPlugin(AbstractComputePlugin):
     device_mask: Sequence[DeviceId] = []
     enabled: bool = True
 
-    async def init(self):
+    async def init(self, context: Any = None) -> None:
         try:
             ret = subprocess.run(['nvidia-docker', 'version'],
                                  stdout=subprocess.PIPE)
