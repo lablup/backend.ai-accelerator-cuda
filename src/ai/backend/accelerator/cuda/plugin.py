@@ -19,8 +19,11 @@ import aiodocker
 
 from ai.backend.common.logging import BraceStyleAdapter
 from ai.backend.agent.resources import (
-    AbstractComputeDevice, AbstractComputePlugin,
-    AbstractAllocMap, DiscretePropertyAllocMap,
+    AbstractComputeDevice,
+    AbstractComputePlugin,
+    DeviceSlotInfo,
+    AbstractAllocMap,
+    DiscretePropertyAllocMap,
 )
 try:
     from ai.backend.agent.resources import get_resource_spec_from_container  # type: ignore
@@ -231,8 +234,12 @@ class CUDAPlugin(AbstractComputePlugin):
     async def create_alloc_map(self) -> AbstractAllocMap:
         devices = await self.list_devices()
         return DiscretePropertyAllocMap(
-            devices=devices,
-            prop_func=lambda dev: 1)
+            device_slots={
+                dev.device_id: (
+                    DeviceSlotInfo(SlotTypes.COUNT, SlotName('cuda.device'), Decimal(1))
+                ) for dev in devices
+            },
+        )
 
     async def get_hooks(self, distro: str, arch: str) -> Sequence[Path]:
         return []
