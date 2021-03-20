@@ -63,6 +63,7 @@ target/
 .idea/
 .env
 .envrc
+.vscode
 
 # Vim
 .*.swp

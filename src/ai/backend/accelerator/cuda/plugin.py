@@ -1,14 +1,20 @@
+import asyncio
 from decimal import Decimal
-import subprocess
+import json
 import logging
 from pathlib import Path
 from pprint import pformat
 import re
 from typing import (
-    Any, Optional,
-    Collection, Set,
-    Mapping, MutableMapping,
-    Sequence, List,
+    Any,
+    Collection,
+    Dict,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Set,
+    Sequence,
     Tuple,
 )
 import uuid
@@ -46,7 +52,6 @@ __all__ = (
     'PREFIX',
     'CUDADevice',
     'CUDAPlugin',
-    'init',
 )
 
 PREFIX = 'cuda'
@@ -68,31 +73,46 @@ class CUDAPlugin(AbstractComputePlugin):
     slot_types: Sequence[Tuple[SlotName, SlotTypes]] = (
         (SlotName('cuda.device'), SlotTypes('count')),
     )
+
     nvdocker_version: Tuple[int, ...] = (0, 0, 0)
+    docker_version: Tuple[int, ...] = (0, 0, 0)
 
     device_mask: Sequence[DeviceId] = []
     enabled: bool = True
 
     async def init(self, context: Any = None) -> None:
+        rx_triple_version = re.compile(r'(\d+\.\d+\.\d+)')
+        # Check nvidia-docker and docker versions
         try:
-            ret = subprocess.run(['nvidia-docker', 'version'],
-                                 stdout=subprocess.PIPE)
+            proc = await asyncio.create_subprocess_exec(
+                'nvidia-docker', 'version', '-f', '{{json .}}',
+                stdout=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            lines = stdout.decode().splitlines()
         except FileNotFoundError:
             log.warning('nvidia-docker is not installed.')
             log.info('CUDA acceleration is disabled.')
             self.enabled = False
             return
-        rx = re.compile(r'^NVIDIA Docker: (\d+\.\d+\.\d+)')
-        for line in ret.stdout.decode().strip().splitlines():
-            m = rx.search(line)
-            if m is not None:
-                self.nvdocker_version = tuple(map(int, m.group(1).split('.')))
-                break
+        m = rx_triple_version.search(lines[0])
+        if m:
+            self.nvdocker_version = tuple(map(int, m.group(1).split('.')))
         else:
             log.error('could not detect nvidia-docker version!')
             log.info('CUDA acceleration is disabled.')
             self.enabled = False
             return
+        docker_version_data = json.loads(lines[1])
+        m = rx_triple_version.search(docker_version_data['Server']['Version'])
+        if m:
+            self.docker_version = tuple(map(int, m.group(1).split('.')))
+        else:
+            log.error('could not detect docker version!')
+            log.info('CUDA acceleration is disabled.')
+            self.enabled = False
+            return
+
         raw_device_mask = self.plugin_config.get('device_mask')
         if raw_device_mask is not None:
             self.device_mask = [
@@ -251,11 +271,11 @@ class CUDAPlugin(AbstractComputePlugin):
     ) -> Mapping[str, Any]:
         if not self.enabled:
             return {}
-        active_device_ids = set()
+        assigned_device_ids = []
         for slot_type, per_device_alloc in device_alloc.items():
-            for dev_id, alloc in per_device_alloc.items():
+            for device_id, alloc in per_device_alloc.items():
                 if alloc > 0:
-                    active_device_ids.add(dev_id)
+                    assigned_device_ids.append(device_id)
         if self.nvdocker_version[0] == 1:
             timeout = aiohttp.ClientTimeout(total=3)
             async with aiohttp.ClientSession(raise_for_status=True,
@@ -296,8 +316,8 @@ class CUDAPlugin(AbstractComputePlugin):
                     # (e.g., nvidiactl, nvidia-uvm, ... etc.)
                     devices.append(dev)
                     continue
-                dev_id = m.group(1)
-                if dev_id not in active_device_ids:
+                device_id = m.group(1)
+                if device_id not in assigned_device_ids:
                     continue
                 devices.append(dev)
             devices = [{
@@ -312,15 +332,34 @@ class CUDAPlugin(AbstractComputePlugin):
                 },
             }
         elif self.nvdocker_version[0] == 2:
-            device_list_str = ','.join(sorted(active_device_ids))
-            return {
-                'HostConfig': {
-                    'Runtime': 'nvidia',
-                },
-                'Env': [
-                    f"NVIDIA_VISIBLE_DEVICES={device_list_str}",
-                ],
-            }
+            device_list_str = ','.join(sorted(assigned_device_ids))
+            if self.docker_version >= (19, 3, 0):
+                docker_config: Dict[str, Any] = {}
+                if assigned_device_ids:
+                    docker_config.update({
+                        'HostConfig': {
+                            'DeviceRequests': [
+                                {
+                                    "Driver": "nvidia",
+                                    "DeviceIDs": assigned_device_ids,
+                                    # "all" does not work here
+                                    "Capabilities": [
+                                        ["utility", "compute", "video", "graphics", "display"]
+                                    ],
+                                },
+                            ],
+                        },
+                    })
+                return docker_config
+            else:
+                return {
+                    'HostConfig': {
+                        'Runtime': 'nvidia',
+                    },
+                    'Env': [
+                        f"NVIDIA_VISIBLE_DEVICES={device_list_str}",
+                    ],
+                }
         else:
             raise RuntimeError('BUG: should not be reached here!')
 
